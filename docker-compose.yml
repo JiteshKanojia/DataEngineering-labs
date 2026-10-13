@@ -1,0 +1,164 @@
+name: de-labs
+
+# =====================================================================
+#  Data Engineering study stack - Apache Spark 4.2 + Delta Lake
+# =====================================================================
+#  Master UI      http://localhost:8080
+#  Worker UI      http://localhost:8081
+#  History UI     http://localhost:18080
+#  JupyterLab     http://localhost:8888   (token: study)
+#  Streamlit      http://localhost:8501
+#  Spark Connect  sc://localhost:15002
+# =====================================================================
+
+x-spark-volumes: &spark-volumes
+  - ./conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+  - ./conf/log4j2.properties:/opt/spark/conf/log4j2.properties:ro
+  - ./data:/data
+
+x-spark-env: &spark-env
+  SPARK_NO_DAEMONIZE: "true"
+  SPARK_CONF_DIR: "/opt/spark/conf"
+
+services:
+  # ------------------------------------------------------------------
+  spark-master:
+    image: de-labs-spark-base
+    container_name: de-labs-master
+    hostname: spark-master
+    command: start-master.sh
+    environment:
+      <<: *spark-env
+      SPARK_MASTER_HOST: spark-master
+      SPARK_MASTER_PORT: "7077"
+      SPARK_MASTER_WEBUI_PORT: "8080"
+      SPARK_LOCAL_IP: spark-master
+    volumes: *spark-volumes
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    healthcheck:
+      # master binds only to SPARK_LOCAL_IP, so localhost won't answer - hit the bound address
+      test: ["CMD-SHELL", "curl -fsS http://$$SPARK_LOCAL_IP:8080/ >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  spark-worker:
+    image: de-labs-spark-base
+    container_name: de-labs-worker
+    hostname: spark-worker
+    command: start-worker.sh spark://spark-master:7077
+    environment:
+      <<: *spark-env
+      SPARK_LOCAL_IP: spark-worker
+      SPARK_MASTER: spark://spark-master:7077
+      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-2G}
+      WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-2G}
+      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-4}
+      WORKER_CORES: ${SPARK_WORKER_CORES:-4}
+      SPARK_WORKER_WEBUI_PORT: "8081"
+      SPARK_WORKER_DIR: /data/spark-work
+    volumes: *spark-volumes
+    ports:
+      - "8081:8081"
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  spark-connect:
+    image: de-labs-spark-base
+    container_name: de-labs-connect
+    hostname: spark-connect
+    # --wait keeps the connect server in the foreground (see sbin/start-connect-server.sh)
+    # executor capped at 1 core / 512m: otherwise standalone hands it the WHOLE worker
+    # and notebook drivers starve waiting for resources
+    command: start-connect-server.sh --wait --master spark://spark-master:7077 --driver-memory ${CONNECT_DRIVER_MEMORY:-1G} --conf spark.cores.max=1 --conf spark.executor.cores=1 --conf spark.executor.memory=512m
+    environment:
+      <<: *spark-env
+      SPARK_LOCAL_IP: spark-connect
+    volumes: *spark-volumes
+    ports:
+      - "15002:15002"
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  spark-history:
+    image: de-labs-spark-base
+    container_name: de-labs-history
+    hostname: spark-history
+    command: start-history-server.sh
+    environment:
+      <<: *spark-env
+      SPARK_LOCAL_IP: spark-history
+      SPARK_HISTORY_OPTS: "-Dspark.history.fs.logDirectory=/data/spark-events -Dspark.history.ui.port=18080"
+    volumes: *spark-volumes
+    ports:
+      - "18080:18080"
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  jupyter:
+    image: de-labs-jupyter
+    container_name: de-labs-jupyter
+    hostname: jupyter
+    build:
+      context: ./images/jupyter
+    environment:
+      SPARK_LOCAL_IP: jupyter
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN:-study}
+      SPARK_DRIVER_MEMORY: ${JUPYTER_DRIVER_MEMORY:-1536M}
+    volumes:
+      - ./notebooks:/workspace
+      - ./scripts:/scripts:ro
+      - ./data:/data
+      # conf so notebook drivers write event logs (History Server) and use quiet logging
+      - ./conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+      - ./conf/log4j2.properties:/opt/spark/conf/log4j2.properties:ro
+    ports:
+      - "8888:8888"
+      - "4041:4040"
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  streamlit:
+    image: de-labs-streamlit
+    container_name: de-labs-streamlit
+    hostname: streamlit
+    build:
+      context: ./images/streamlit
+    environment:
+      SPARK_LOCAL_IP: streamlit
+      SPARK_DRIVER_MEMORY: 1G
+    volumes:
+      - ./data:/data
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  data-generator:
+    image: de-labs-spark-base
+    container_name: de-labs-generator
+    hostname: data-generator
+    working_dir: /repo
+    command: python3 scripts/stream_generator.py --interval ${GEN_INTERVAL_SECONDS:-3} --events ${GEN_EVENTS_PER_FILE:-200} --late-pct ${GEN_LATE_PCT:-3} --dup-pct ${GEN_DUP_PCT:-2}
+    environment:
+      <<: *spark-env
+    volumes:
+      - ./scripts:/repo/scripts
+      - ./data:/data
+    restart: unless-stopped

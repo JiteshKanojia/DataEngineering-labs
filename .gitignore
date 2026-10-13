@@ -1,0 +1,22 @@
+# --- generated lakehouse state (rebuild: `make seed` + run the notebooks) ---
+data/
+
+# --- jupyter / python artifacts ---
+.ipynb_checkpoints/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# --- local environment (template: .env.example) ---
+.env
+
+# --- agent tool state (Command Code) ---
+.commandcode/
+
+# --- os / editor noise ---
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
